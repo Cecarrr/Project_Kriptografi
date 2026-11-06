@@ -1,0 +1,26 @@
+# CryptVault - Tugas Akhir Kriptografi
+# Python 3.14, Windows. Pasang dengan:  pip install -r requirements.txt
+
+# Folder berisi file wheel dlib (letakkan dlib-*.whl di sini, di dalam repo)
+--find-links ./wheels
+
+# --- Wajah dan webcam ---
+dlib
+face_recognition
+# face_recognition_models masih memakai pkg_resources yang dihapus di setuptools 81.
+# Python 3.12+ tidak membawa setuptools di venv, jadi wajib dipasang dan di-pin.
+setuptools<81
+numpy
+opencv-python
+Pillow
+
+# --- Antarmuka ---
+customtkinter
+
+# --- Kriptografi ---
+cryptography
+argon2-cffi
+
+# --- Dongle (deteksi flashdisk dan serial di Windows) ---
+pywin32
+psutil
