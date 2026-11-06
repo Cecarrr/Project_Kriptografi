@@ -1,4 +1,4 @@
-"""Cek lingkungan CryptVault. Jalankan di dalam venv:  python check_env.py"""
+"""Cek lingkungan Brankas. Jalankan di dalam venv:  python check_env.py"""
 import sys
 
 hasil = {"ok": 0, "gagal": 0, "peringatan": 0}
@@ -60,7 +60,7 @@ def pillow_ver():
 def aes_chacha():
     import os
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
-    data = b"uji enkripsi CryptVault"
+    data = b"uji enkripsi Brankas"
     for kelas in (AESGCM, ChaCha20Poly1305):
         kunci, nonce = kelas.generate_key(bit_length=256) if kelas is AESGCM else kelas.generate_key(), os.urandom(12)
         c = kelas(kunci)
@@ -105,7 +105,7 @@ def flashdisk():
 
 
 if __name__ == "__main__":
-    print("== Cek lingkungan CryptVault ==")
+    print("== Cek lingkungan Brankas ==")
     cek("Python", python_ver)
     cek("dlib", dlib_ver, "pasang ulang wheel dlib di dalam venv ini")
     cek("face_recognition + model", face_models,
