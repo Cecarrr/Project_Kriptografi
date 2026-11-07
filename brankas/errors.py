@@ -19,3 +19,5 @@ class StegoNotFound(BrankasError): ...         # PNG tidak berisi payload
 class ChainTampered(BrankasError): ...
 class ItemNotFound(BrankasError): ...         # dokumen / catatan / file sumber tidak ditemukan
 class InvalidInput(BrankasError): ...         # input pengguna tidak valid (mis. catatan kosong)
+class SessionLocked(BrankasError): ...        # sesi sudah dikunci (logout / dongle dicabut)
+class UnsafePath(BrankasError): ...           # stored_path tidak berupa nama berkas biasa

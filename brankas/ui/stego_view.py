@@ -1,6 +1,7 @@
 """Sisipkan dan ekstrak catatan terenkripsi di gambar PNG. Pemilik: Anggota A."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import TYPE_CHECKING
@@ -8,11 +9,14 @@ from typing import TYPE_CHECKING
 import customtkinter as ctk
 from PIL import Image
 
+from brankas.applog import get_logger
 from brankas.errors import BrankasError
 from brankas.stego import lsb
 
 if TYPE_CHECKING:
     from brankas.auth.login import Session
+
+log = get_logger("stego")
 
 _COLOR_SUCCESS = "#2e7d32"
 _COLOR_ERROR = "#c62828"
@@ -37,8 +41,40 @@ class StegoView(ctk.CTkFrame):
         self._cover_thumb: ctk.CTkImage | None = None
         self._stego_path: Path | None = None
         self._stego_thumb: ctk.CTkImage | None = None
+        self._clipboard_dirty = False   # True bila aplikasi pernah menyalin catatan rahasia ke clipboard
 
         self._build_ui()
+
+    # ------------------------------------------------------------ utilitas
+    @contextmanager
+    def _guard(self, title: str = "Gagal", on_error=None):
+        """Seperti _guard di dashboard: error apa pun jadi dialog, aplikasi tidak crash.
+        on_error(pesan) opsional untuk memperbarui label status pada layar ini."""
+        try:
+            yield
+        except BrankasError as e:
+            log.warning("%s: %s", title, type(e).__name__)
+            if on_error:
+                on_error(f"❌ {e}")
+            messagebox.showerror(title, str(e), parent=self.winfo_toplevel())
+        except Exception as e:  # noqa: BLE001
+            log.exception("kesalahan tak terduga di steganografi (%s)", title)
+            msg = f"{type(e).__name__}: {e}"
+            if on_error:
+                on_error(f"❌ {msg}")
+            messagebox.showerror("Kesalahan tak terduga", msg, parent=self.winfo_toplevel())
+
+    def wipe_sensitive(self) -> None:
+        """Hapus catatan rahasia dari textbox dan, bila pernah disalin, dari clipboard.
+        Dipanggil saat layar ditutup (logout / dongle dicabut)."""
+        try:
+            self.text_embed_note.delete("1.0", "end")
+            self.text_extracted.delete("1.0", "end")
+            if self._clipboard_dirty:
+                self.clipboard_clear()
+                self._clipboard_dirty = False
+        except Exception:  # noqa: BLE001  (widget mungkin sudah dihancurkan)
+            log.exception("gagal membersihkan widget steganografi")
 
     def _build_ui(self) -> None:
         self.subtabs = ctk.CTkTabview(self)
@@ -244,6 +280,15 @@ class StegoView(ctk.CTkFrame):
             )
             self.label_cover_meta.configure(text=str(e), text_color=_COLOR_ERROR)
             messagebox.showerror("Gambar Tidak Valid", str(e), parent=self.winfo_toplevel())
+        except Exception as e:  # noqa: BLE001
+            log.exception("gagal memuat gambar cover")
+            self._cover_path = None
+            self._cover_thumb = None
+            self.btn_cancel_cover.configure(state="disabled")
+            self.label_cover_thumb.configure(image=None, text="⚠️")
+            self.label_cover_title.configure(text=f"❌ Gagal Memuat: {p.name}", text_color=_COLOR_ERROR)
+            self.label_cover_meta.configure(text=f"{type(e).__name__}: {e}", text_color=_COLOR_ERROR)
+            messagebox.showerror("Gambar Tidak Valid", f"{type(e).__name__}: {e}", parent=self.winfo_toplevel())
 
     def _cancel_cover_image(self) -> None:
         """Batalkan pemilihan gambar cover."""
@@ -287,8 +332,13 @@ class StegoView(ctk.CTkFrame):
             return
 
         out_p = Path(out_path_str)
-        try:
+
+        def show_error(msg: str) -> None:
+            self.label_embed_result.configure(text=msg, text_color=_COLOR_ERROR)
+
+        with self._guard("Gagal Menyembunyikan", on_error=show_error):
             lsb.hide_note(self.session, self._cover_path, content, out_p)
+            log.info("embed stego berhasil user=%s panjang=%d", self.session.user_id, len(content))
             self.label_embed_result.configure(
                 text=f"✔ Berhasil disembunyikan ke: {out_p.name}",
                 text_color=_COLOR_SUCCESS,
@@ -302,9 +352,6 @@ class StegoView(ctk.CTkFrame):
                 parent=self.winfo_toplevel(),
             ):
                 self.subtabs.set("  Ekstrak Catatan (Reveal)  ")
-        except BrankasError as e:
-            self.label_embed_result.configure(text=f"❌ {e}", text_color=_COLOR_ERROR)
-            messagebox.showerror("Gagal Menyembunyikan", str(e), parent=self.winfo_toplevel())
 
     # =========================================================================
     # TAB 2: Ekstrak Catatan (Reveal)
@@ -522,18 +569,19 @@ class StegoView(ctk.CTkFrame):
             )
             return
 
-        try:
+        def show_error(msg: str) -> None:
+            self.text_extracted.delete("1.0", "end")
+            self.label_extract_result.configure(text=msg, text_color=_COLOR_ERROR)
+
+        with self._guard("Gagal Mengekstrak", on_error=show_error):
             revealed = lsb.reveal_note(self.session, self._stego_path)
+            log.info("ekstrak stego berhasil user=%s", self.session.user_id)
             self.text_extracted.delete("1.0", "end")
             self.text_extracted.insert("1.0", revealed)
             self.label_extract_result.configure(
                 text=f"✔ Catatan berhasil diekstrak dari: {self._stego_path.name}",
                 text_color=_COLOR_SUCCESS,
             )
-        except BrankasError as e:
-            self.text_extracted.delete("1.0", "end")
-            self.label_extract_result.configure(text=f"❌ {e}", text_color=_COLOR_ERROR)
-            messagebox.showerror("Gagal Mengekstrak", str(e), parent=self.winfo_toplevel())
 
     def _copy_revealed_note(self) -> None:
         text = self.text_extracted.get("1.0", "end-1c")
@@ -542,4 +590,10 @@ class StegoView(ctk.CTkFrame):
             return
         self.clipboard_clear()
         self.clipboard_append(text)
-        messagebox.showinfo("Berhasil", "Catatan rahasia berhasil disalin ke clipboard!", parent=self.winfo_toplevel())
+        self._clipboard_dirty = True
+        messagebox.showinfo(
+            "Berhasil",
+            "Catatan rahasia berhasil disalin ke clipboard!\n"
+            "Clipboard akan dibersihkan otomatis saat Anda keluar atau dongle dicabut.",
+            parent=self.winfo_toplevel(),
+        )

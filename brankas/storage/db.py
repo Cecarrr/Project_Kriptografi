@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS chain (
     nonce INTEGER NOT NULL,
     hash TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS lockouts (
+    key TEXT PRIMARY KEY,                 -- mis. "face:3" / "password:3" (jenis:user_id)
+    failures INTEGER NOT NULL DEFAULT 0,
+    locked_until REAL NOT NULL DEFAULT 0  -- waktu epoch (detik); 0 = tidak terkunci
+);
 """
 
 
@@ -108,3 +113,26 @@ def get_user_by_dongle(conn, dongle_serial_hash: str) -> sqlite3.Row | None:
 
 def get_user(conn, user_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+
+# ---- lockouts (dipakai auth/login.py; tahan restart aplikasi) ----
+def get_lockout(conn, key: str) -> tuple[int, float]:
+    """(jumlah gagal berturut-turut, locked_until epoch). (0, 0.0) bila belum ada."""
+    row = conn.execute("SELECT failures, locked_until FROM lockouts WHERE key = ?", (key,)).fetchone()
+    return (int(row["failures"]), float(row["locked_until"])) if row else (0, 0.0)
+
+
+def set_lockout(conn, key: str, failures: int, locked_until: float) -> None:
+    conn.execute(
+        "INSERT INTO lockouts (key, failures, locked_until) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET failures = excluded.failures, locked_until = excluded.locked_until",
+        (key, failures, locked_until),
+    )
+
+
+def clear_lockout(conn, key: str) -> None:
+    conn.execute("DELETE FROM lockouts WHERE key = ?", (key,))
+
+
+def clear_all_lockouts(conn) -> None:
+    conn.execute("DELETE FROM lockouts")

@@ -12,6 +12,8 @@ from pathlib import Path
 
 from brankas import config
 from brankas.core.crypto import sha256_hex
+from brankas.errors import UnsafePath
+from brankas.storage.vault import safe_vault_path
 
 GENESIS_PREV = "0" * 64
 VALID_ACTIONS = ("UPLOAD", "DELETE")
@@ -146,7 +148,11 @@ def verify_chain(conn, vault_dir: Path) -> VerifyResult:
         if doc_id not in docs:
             problems.append(f"{short}: hilang dari basis data tanpa catatan DELETE")
             continue
-        f = Path(vault_dir) / docs[doc_id]
+        try:
+            f = safe_vault_path(vault_dir, docs[doc_id])
+        except UnsafePath as e:
+            problems.append(f"{short}: {e}")
+            continue
         if not f.is_file():
             problems.append(f"{short}: file terenkripsi hilang dari vault")
         elif sha256_hex(f.read_bytes()) != expected:
@@ -158,6 +164,14 @@ def verify_chain(conn, vault_dir: Path) -> VerifyResult:
     return VerifyResult(ok=not problems, checked_blocks=len(blocks), problems=problems)
 
 
-def list_blocks(conn) -> list[Block]:
-    """Semua blok urut dari genesis (untuk ditampilkan di UI)."""
-    return [_row_to_block(r) for r in conn.execute("SELECT * FROM chain ORDER BY idx")]
+def list_blocks(conn, user_id: int | None = None) -> list[Block]:
+    """Blok urut dari genesis (untuk ditampilkan di UI).
+    user_id=None: semua blok (dipakai verifikasi/tes). user_id diisi: hanya blok milik pengguna itu,
+    sehingga UI tidak membocorkan jumlah dan waktu aksi akun lain (blok genesis ikut disembunyikan).
+    Verifikasi (verify_chain) selalu memeriksa seluruh rantai, terlepas dari filter tampilan ini."""
+    if user_id is None:
+        rows = conn.execute("SELECT * FROM chain ORDER BY idx")
+    else:
+        rows = conn.execute("SELECT * FROM chain WHERE user_id = ? AND action != 'GENESIS' ORDER BY idx",
+                            (user_id,))
+    return [_row_to_block(r) for r in rows]

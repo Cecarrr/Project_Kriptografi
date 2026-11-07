@@ -4,9 +4,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from brankas.applog import get_logger
 from brankas.core import crypto
 from brankas.errors import DecryptionError, InvalidInput, ItemNotFound
 from brankas.storage import db
+
+log = get_logger("notes")
 
 if TYPE_CHECKING:
     from brankas.auth.login import Session
@@ -31,6 +34,7 @@ def add_note(session: Session, text: str) -> Note:
         created_at = conn.execute(
             "SELECT created_at FROM notes WHERE id = ?", (cur.lastrowid,)
         ).fetchone()["created_at"]
+    log.info("tambah catatan id=%s user=%s panjang=%d", cur.lastrowid, session.user_id, len(text))
     return Note(cur.lastrowid, text, created_at)
 
 
@@ -57,3 +61,4 @@ def delete_note(session: Session, note_id: int) -> None:
         )
         if cur.rowcount == 0:
             raise ItemNotFound("Catatan tidak ditemukan")
+    log.info("hapus catatan id=%s user=%s", note_id, session.user_id)

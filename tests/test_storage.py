@@ -12,8 +12,12 @@ from brankas import config
 from brankas.chain import blockchain
 from brankas.core import keys as kmod
 from brankas.errors import (DecryptionError, FileTooLarge, InvalidInput, ItemNotFound,
-                            UnsupportedFileType, UserExists)
-from brankas.storage import db, documents, notes
+                            UnsafePath, UnsupportedFileType, UserExists)
+from brankas.storage import db, documents, notes, vault
+
+
+def list_idx(blocks):
+    return [b.idx for b in blocks]
 
 
 class StorageTestCase(unittest.TestCase):
@@ -60,6 +64,73 @@ class TestDb(StorageTestCase):
         with db.transaction() as conn:
             self.assertEqual(db.get_user_by_dongle(conn, "dongle-2")["id"], self.uid2)
             self.assertIsNone(db.get_user_by_dongle(conn, "tidak-ada"))
+
+
+    def test_lockout_helpers(self):
+        with db.transaction() as conn:
+            self.assertEqual(db.get_lockout(conn, "face:1"), (0, 0.0))
+            db.set_lockout(conn, "face:1", 2, 123.5)
+            db.set_lockout(conn, "face:1", 0, 999.0)          # upsert, bukan duplikat
+            db.set_lockout(conn, "password:1", 1, 0.0)
+            self.assertEqual(db.get_lockout(conn, "face:1"), (0, 999.0))
+            db.clear_lockout(conn, "face:1")
+            self.assertEqual(db.get_lockout(conn, "face:1"), (0, 0.0))
+            self.assertEqual(db.get_lockout(conn, "password:1"), (1, 0.0))
+            db.clear_all_lockouts(conn)
+            self.assertEqual(db.get_lockout(conn, "password:1"), (0, 0.0))
+
+
+class TestVaultPaths(StorageTestCase):
+    GOOD = ["0b9c3a52-6a4e-4a4c-9a0e-6f5b8f0d1c11.enc", "abc.enc", "A1_b-2.enc"]
+    BAD = ["", ".", "..", "../x.enc", "..\\x.enc", "a/b.enc", "a\\b.enc", "/abs.enc", "C:\\x.enc",
+           "C:x.enc", "x..enc", "x.txt", "x", ".enc", ".hidden.enc", "bad name.enc", "x.enc\x00", None, 5]
+
+    def test_valid_names(self):
+        for name in self.GOOD:
+            self.assertEqual(vault.validate_stored_name(name), name)
+            self.assertEqual(vault.safe_vault_path(config.VAULT_DIR, name).parent,
+                             Path(config.VAULT_DIR).resolve())
+
+    def test_invalid_names(self):
+        for name in self.BAD:
+            with self.assertRaises(UnsafePath, msg=repr(name)):
+                vault.validate_stored_name(name)
+            with self.assertRaises(UnsafePath, msg=repr(name)):
+                vault.safe_vault_path(config.VAULT_DIR, name)
+
+    def _corrupt_path(self, doc_id, value):
+        with db.transaction() as conn:
+            conn.execute("UPDATE documents SET stored_path = ? WHERE id = ?", (value, doc_id))
+
+    def test_export_rejects_tampered_path(self):
+        info = documents.add_document(self.s1, self.make_file())
+        outside = self.tmp / "luar.enc"
+        outside.write_bytes(b"x")
+        self._corrupt_path(info.id, "..\\..\\luar.enc")
+        with self.assertRaises(UnsafePath):
+            documents.export_document(self.s1, info.id, self.tmp / "keluar.txt")
+        self.assertFalse((self.tmp / "keluar.txt").exists())
+
+    def test_delete_rejects_tampered_path_and_touches_nothing(self):
+        info = documents.add_document(self.s1, self.make_file())
+        outside = self.tmp / "luar.enc"
+        outside.write_bytes(b"penting")
+        self._corrupt_path(info.id, "../luar.enc")
+        with self.assertRaises(UnsafePath):
+            documents.delete_document(self.s1, info.id)
+        self.assertTrue(outside.exists())                              # berkas di luar vault utuh
+        self.assertTrue((config.VAULT_DIR / f"{info.id}.enc").exists())  # berkas vault asli utuh
+        with db.transaction() as conn:                                  # baris & rantai tidak berubah
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)
+            actions = [r["action"] for r in conn.execute("SELECT action FROM chain ORDER BY idx")]
+        self.assertEqual(actions, ["GENESIS", "UPLOAD"])
+
+    def test_verify_reports_tampered_path(self):
+        info = documents.add_document(self.s1, self.make_file())
+        self._corrupt_path(info.id, "../luar.enc")
+        r = self.verify()
+        self.assertFalse(r.ok)
+        self.assertTrue(any("tidak aman" in p or "stored_path" in p for p in r.problems), r.problems)
 
 
 class TestDocuments(StorageTestCase):
@@ -184,6 +255,22 @@ class TestChain(StorageTestCase):
         with db.transaction() as conn:
             with self.assertRaises(ValueError):
                 blockchain.add_block(conn, 1, "HACK", "x", "y")
+
+    def test_list_blocks_filtered_per_user(self):
+        a = documents.add_document(self.s1, self.make_file("a.txt"))
+        b = documents.add_document(self.s2, self.make_file("b.txt"))
+        documents.delete_document(self.s1, a.id)
+        with db.transaction() as conn:
+            own1 = blockchain.list_blocks(conn, self.uid1)
+            own2 = blockchain.list_blocks(conn, self.uid2)
+            everything = blockchain.list_blocks(conn)
+        self.assertEqual([x.action for x in own1], ["UPLOAD", "DELETE"])
+        self.assertTrue(all(x.user_id == self.uid1 for x in own1))
+        self.assertEqual([(x.action, x.doc_id) for x in own2], [("UPLOAD", b.id)])
+        self.assertNotIn("GENESIS", [x.action for x in own1 + own2])   # genesis tidak ikut tampil
+        self.assertEqual(len(everything), 4)                            # tanpa filter: seluruh rantai
+        self.assertEqual(list_idx(own1), [1, 3])                        # nomor blok asli dipertahankan
+        self.assertTrue(self.verify().ok)                                # verifikasi tetap global
 
     def test_list_blocks(self):
         documents.add_document(self.s1, self.make_file())

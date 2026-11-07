@@ -11,9 +11,12 @@ import numpy as np
 from PIL import Image
 
 from brankas import config
+from brankas.applog import get_logger
 from brankas.auth import dongle, face, login
 from brankas.auth.login import LoginFlow, Session
 from brankas.errors import BrankasError, NoFaceDetected
+
+log = get_logger("login_view")
 
 _COLOR_SUCCESS = "#2e7d32"
 _COLOR_ERROR = "#c62828"
@@ -322,6 +325,18 @@ class LoginView(ctk.CTkFrame):
 
         self._build_ui()
 
+    def destroy(self) -> None:
+        """Lepas dongle.key, sampel wajah, dan isi kolom password sebelum layar dihancurkan."""
+        try:
+            self.flow.clear()
+            self._captured_face_frame = None
+            self._reg_face_frames.clear()
+            for entry in (self.entry_login_pw, self.entry_reg_pw1, self.entry_reg_pw2):
+                entry.delete(0, "end")
+        except Exception:  # noqa: BLE001  (widget mungkin sudah hancur)
+            pass
+        super().destroy()
+
     def _build_ui(self) -> None:
         # Header Aplikasi
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -534,6 +549,10 @@ class LoginView(ctk.CTkFrame):
         except BrankasError as e:
             self.label_dongle_status.configure(text=f"❌ {e}", text_color=_COLOR_ERROR)
             messagebox.showerror("Dongle Tidak Ditemukan", str(e), parent=self.winfo_toplevel())
+        except Exception as e:  # noqa: BLE001
+            log.exception("kesalahan tak terduga saat memeriksa dongle")
+            self.label_dongle_status.configure(text=f"❌ {type(e).__name__}: {e}", text_color=_COLOR_ERROR)
+            messagebox.showerror("Kesalahan", f"{type(e).__name__}: {e}", parent=self.winfo_toplevel())
 
     def _open_camera_login(self) -> None:
         def on_success(frame: np.ndarray):
@@ -652,13 +671,22 @@ class LoginView(ctk.CTkFrame):
 
         try:
             session = self.flow.step_password(pw)
-            self.label_pw_status.configure(text="✔ Password Cocok! Masuk ke Brankas...", text_color=_COLOR_SUCCESS)
-            self.on_login_success(session)
         except BrankasError as e:
+            self.entry_login_pw.delete(0, "end")
             self.label_pw_status.configure(text=f"❌ {e}", text_color=_COLOR_ERROR)
             messagebox.showerror("Login Gagal", str(e), parent=self.winfo_toplevel())
+        except Exception as e:  # noqa: BLE001
+            log.exception("kesalahan tak terduga saat login")
+            self.entry_login_pw.delete(0, "end")
+            self.label_pw_status.configure(text=f"❌ {type(e).__name__}: {e}", text_color=_COLOR_ERROR)
+            messagebox.showerror("Kesalahan", f"{type(e).__name__}: {e}", parent=self.winfo_toplevel())
+        else:
+            self.label_pw_status.configure(text="✔ Password Cocok! Masuk ke Brankas...", text_color=_COLOR_SUCCESS)
+            self.entry_login_pw.delete(0, "end")
+            self.on_login_success(session)   # di luar try: layar ini akan dihancurkan oleh pemanggil
 
     def _reset_login_flow(self) -> None:
+        self.flow.clear()
         self.flow = LoginFlow()
         self._face_attempts = 0
         self._face_verified = False
@@ -707,6 +735,19 @@ class LoginView(ctk.CTkFrame):
 
         self.entry_reg_pw2 = ctk.CTkEntry(card, placeholder_text="Ulangi Password...", show="*", width=320)
         self.entry_reg_pw2.pack(anchor="w", padx=16, pady=4)
+
+        self.label_pw_hint = ctk.CTkLabel(
+            card,
+            text=f"Password minimal {config.PASSWORD_MIN_LENGTH} karakter.",
+            font=ctk.CTkFont(size=11),
+            text_color=_COLOR_MUTED,
+            anchor="w",
+            wraplength=420,
+            justify="left",
+        )
+        self.label_pw_hint.pack(anchor="w", padx=18, pady=(0, 2))
+        self.entry_reg_pw1.bind("<KeyRelease>", self._update_pw_hint)
+        self.entry_reg_pw2.bind("<KeyRelease>", self._update_pw_hint)
 
         # 2. Pemilihan Drive Flashdisk
         ctk.CTkLabel(
@@ -803,6 +844,24 @@ class LoginView(ctk.CTkFrame):
         ).pack(anchor="w", padx=16, pady=(8, 16))
 
         self._refresh_drives()
+
+    def _update_pw_hint(self, _event=None) -> None:
+        """Petunjuk langsung (live) tentang kebijakan password di form registrasi."""
+        pw1 = self.entry_reg_pw1.get()
+        pw2 = self.entry_reg_pw2.get()
+        if not pw1:
+            text, color = f"Password minimal {config.PASSWORD_MIN_LENGTH} karakter.", _COLOR_MUTED
+        else:
+            problem = login.password_problem(pw1)
+            if problem:
+                text, color = f"❌ {problem}", _COLOR_ERROR
+            elif pw2 and pw1 != pw2:
+                text, color = "⚠️ Konfirmasi password belum cocok.", _COLOR_WARNING
+            elif pw2:
+                text, color = "✔ Password memenuhi syarat dan konfirmasi cocok.", _COLOR_SUCCESS
+            else:
+                text, color = "✔ Panjang password memenuhi syarat. Ulangi password di kolom bawahnya.", _COLOR_SUCCESS
+        self.label_pw_hint.configure(text=text, text_color=color)
 
     def _open_camera_register(self) -> None:
         def on_complete(samples: list[np.ndarray]):
@@ -909,8 +968,10 @@ class LoginView(ctk.CTkFrame):
         if not username:
             messagebox.showwarning("Peringatan", "Username tidak boleh kosong.", parent=self.winfo_toplevel())
             return
-        if not pw1:
-            messagebox.showwarning("Peringatan", "Password tidak boleh kosong.", parent=self.winfo_toplevel())
+        problem = login.password_problem(pw1)
+        if problem:
+            self._update_pw_hint()
+            messagebox.showwarning("Password Tidak Memenuhi Syarat", problem, parent=self.winfo_toplevel())
             return
         if pw1 != pw2:
             messagebox.showwarning("Peringatan", "Konfirmasi password tidak cocok.", parent=self.winfo_toplevel())
@@ -938,6 +999,12 @@ class LoginView(ctk.CTkFrame):
                 f"Akun '{username}' berhasil didaftarkan!\nKunci dongle telah ditulis ke drive {drive}.\n\nAnda akan otomatis masuk ke Brankas.",
                 parent=self.winfo_toplevel(),
             )
-            self.on_login_success(session)
         except BrankasError as e:
             messagebox.showerror("Registrasi Gagal", str(e), parent=self.winfo_toplevel())
+        except Exception as e:  # noqa: BLE001
+            log.exception("kesalahan tak terduga saat registrasi")
+            messagebox.showerror("Kesalahan", f"{type(e).__name__}: {e}", parent=self.winfo_toplevel())
+        else:
+            self.entry_reg_pw1.delete(0, "end")
+            self.entry_reg_pw2.delete(0, "end")
+            self.on_login_success(session)   # di luar try: layar ini akan dihancurkan oleh pemanggil

@@ -1,22 +1,11 @@
-# Lingkungan Python
-.venv/
+# Jangan pernah di-commit (lihat Master File bagian 10)
+dongle.key
+*.db
+data/
+vault/
+wheels/*.whl
+
 __pycache__/
 *.pyc
-
-# Rahasia dan data aplikasi (jangan pernah di-commit)
-dongle.key
-*.key
-*.db
-*.sqlite3
-vault/
-data/
-.env
-
-# Editor dan OS
-.vscode/
-.idea/
-Thumbs.db
-desktop.ini
-
-# Catatan: folder wheels/ (berisi dlib-*.whl) SENGAJA di-commit
-# agar kedua anggota memakai file yang sama.
+.venv/
+venv/
