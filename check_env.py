@@ -98,9 +98,14 @@ def flashdisk():
     import win32api
     baris = []
     for p in psutil.disk_partitions(all=False):
+        if not p.fstype:
+            continue
         if "removable" in p.opts.lower():
-            serial = win32api.GetVolumeInformation(p.mountpoint)[1] & 0xFFFFFFFF
-            baris.append(f"{p.device} serial={serial:08X}")
+            try:
+                serial = win32api.GetVolumeInformation(p.mountpoint)[1] & 0xFFFFFFFF
+                baris.append(f"{p.device} serial={serial:08X}")
+            except Exception:
+                pass
     return ", ".join(baris) if baris else "tidak ada flashdisk terdeteksi (colokkan untuk menguji)"
 
 

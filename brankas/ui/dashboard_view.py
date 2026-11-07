@@ -22,6 +22,7 @@ from brankas import config
 from brankas.chain import blockchain
 from brankas.errors import BrankasError
 from brankas.storage import db, documents, notes
+from brankas.ui.stego_view import StegoView
 
 if TYPE_CHECKING:
     from brankas.auth.login import Session
@@ -106,6 +107,8 @@ class DashboardView(ctk.CTkFrame):
         self._build_docs_tab(self.tabview.add("Dokumen"))
         self._build_notes_tab(self.tabview.add("Catatan"))
         self._build_chain_tab(self.tabview.add("Blockchain"))
+        stego_tab = self.tabview.add("Steganografi")
+        StegoView(stego_tab, self.session).pack(fill="both", expand=True)
         self.refresh_all()
 
     # ------------------------------------------------------------ utilitas
