@@ -22,6 +22,8 @@ def run() -> None:
     app = ctk.CTk()
     app.title("Brankas - Sistem Penyimpanan Dokumen Aman")
     app.geometry("1000x700")
+    if dongle.dev_dir() is not None:   # peringatan agar mode dev tidak terbawa ke demo
+        app.title("Brankas [MODE DEV DONGLE - JANGAN DIPAKAI SAAT DEMO]")
 
     current_frame: ctk.CTkFrame | None = None
     dongle_poll_id: str | None = None

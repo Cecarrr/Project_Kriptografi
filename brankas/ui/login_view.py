@@ -21,6 +21,12 @@ _COLOR_WARNING = "#f57c00"
 _COLOR_MUTED = ("gray40", "gray70")
 
 
+def _face_upload_allowed() -> bool:
+    """Unggah foto wajah hanya untuk pengembangan (config.ALLOW_FACE_UPLOAD = True).
+    Default mati: login harus memakai kamera langsung, bukan foto."""
+    return bool(getattr(config, "ALLOW_FACE_UPLOAD", False))
+
+
 def _read_image_to_rgb(path: Path) -> np.ndarray:
     im = cv2.imread(str(path))
     if im is None:
@@ -74,7 +80,7 @@ class CameraPreviewDialog(ctk.CTkToplevel):
             messagebox.showerror(
                 "Kamera Tidak Tersedia",
                 "Kamera webcam tidak dapat dibuka (sedang dipakai aplikasi lain atau izin dinonaktifkan).\n\n"
-                "Anda dapat menggunakan tombol '📁 Unggah Foto...' sebagai alternatif.",
+                "Tutup aplikasi lain yang memakai kamera, lalu coba lagi.",
                 parent=parent.winfo_toplevel(),
             )
             self.after(50, self.destroy)
@@ -420,7 +426,8 @@ class LoginView(ctk.CTkFrame):
             state="disabled",
             command=self._do_upload_face,
         )
-        self.btn_upload_face.pack(side="right", padx=8)
+        if _face_upload_allowed():
+            self.btn_upload_face.pack(side="right", padx=8)
 
         # Konten status wajah
         f_body = ctk.CTkFrame(self.card_face, fg_color="transparent")
@@ -605,6 +612,8 @@ class LoginView(ctk.CTkFrame):
         )
 
     def _do_upload_face(self) -> None:
+        if not _face_upload_allowed():
+            return
         file_path = filedialog.askopenfilename(
             title="Pilih Berkas Foto Wajah",
             filetypes=[("Berkas Gambar", "*.jpg;*.jpeg;*.png")],
@@ -761,7 +770,8 @@ class LoginView(ctk.CTkFrame):
             fg_color="gray30",
             command=self._reg_upload_sample,
         )
-        self.btn_reg_upload.pack(side="left", padx=8)
+        if _face_upload_allowed():
+            self.btn_reg_upload.pack(side="left", padx=8)
 
         # Tombol batal/reset foto registrasi
         self.btn_reg_cancel = ctk.CTkButton(
@@ -857,6 +867,8 @@ class LoginView(ctk.CTkFrame):
             self.label_drive_selected.configure(text=f"Drive terpilih: {folder}", text_color=_COLOR_SUCCESS)
 
     def _reg_upload_sample(self) -> None:
+        if not _face_upload_allowed():
+            return
         file_path = filedialog.askopenfilename(
             title="Pilih Foto Wajah Pengguna",
             filetypes=[("Berkas Gambar", "*.jpg;*.jpeg;*.png")],

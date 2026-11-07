@@ -40,36 +40,30 @@ def encode_face(frame: np.ndarray) -> np.ndarray:
 
 
 def enroll(frames: list[np.ndarray]) -> bytes:
-    """Dari beberapa frame hasilkan encoding gabungan (rata-rata) dalam bentuk bytes."""
+    """Dari beberapa frame hasilkan encoding gabungan (rata-rata) dalam bentuk bytes.
+    Tidak dinormalkan: encoding live pada verify() juga mentah, supaya jarak sebanding."""
     if not frames:
         raise InvalidInput("Dibutuhkan minimal satu frame untuk pendaftaran wajah")
 
-    encs = []
-    for f in frames:
-        enc = encode_face(f)
-        encs.append(enc)
+    encs = [encode_face(f) for f in frames]
+    return np.mean(encs, axis=0).astype(np.float64).tobytes()
 
-    avg_enc = np.mean(encs, axis=0).astype(np.float64)
-    norm = np.linalg.norm(avg_enc)
-    if norm > 0:
-        avg_enc = avg_enc / norm
 
-    return avg_enc.tobytes()
+def distance(frame: np.ndarray, stored: bytes) -> float:
+    """Jarak Euclidean antara wajah di frame dan encoding tersimpan (makin kecil makin mirip).
+    NoFaceDetected bila tidak ada wajah di frame."""
+    current_enc = encode_face(frame)
+    stored_enc = np.frombuffer(stored, dtype=np.float64)
+    if len(stored_enc) != 128:
+        raise BrankasError("Format data encoding wajah tersimpan tidak valid")
+    return float(np.linalg.norm(current_enc - stored_enc))
 
 
 def verify(frame: np.ndarray, stored: bytes, tolerance: float | None = None) -> bool:
     """Bandingkan wajah di frame dengan encoding tersimpan (bytes dari enroll)."""
     if tolerance is None:
         tolerance = config.FACE_TOLERANCE
-
     try:
-        current_enc = encode_face(frame)
+        return distance(frame, stored) <= tolerance
     except NoFaceDetected:
         return False
-
-    stored_enc = np.frombuffer(stored, dtype=np.float64)
-    if len(stored_enc) != 128:
-        raise BrankasError("Format data encoding wajah tersimpan tidak valid")
-
-    dist = np.linalg.norm(current_enc - stored_enc)
-    return bool(dist <= tolerance)
