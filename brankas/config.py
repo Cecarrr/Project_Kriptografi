@@ -29,6 +29,13 @@ FACE_TOLERANCE = 0.5
 FACE_ENROLL_SAMPLES = 3
 FACE_MAX_ATTEMPTS = 3
 FACE_LOCKOUT_SECONDS = 30.0
+FACE_LANDMARK_MODEL = "large"     # "small" (5 titik, lebih cepat) atau "large" (68 titik, sedikit lebih akurat)
+FACE_JITTERS_ENROLL = 10          # jitter saat pendaftaran (jarang dilakukan, boleh mahal)
+FACE_JITTERS_LOGIN = 5            # jitter saat login (tiap jitter menambah waktu proses)
+FACE_MIN_SIZE_PX = 110            # tinggi minimal kotak wajah di frame; PERKIRAAN, ukur di webcam Anda
+FACE_AMBIGUITY_RATIO = 0.5        # wajah kedua >= rasio ini x luas wajah terbesar => ambigu, ditolak
+FACE_ENROLL_MAX_SPREAD = 0.4      # jarak maksimal antar sampel pendaftaran; lebih besar => sampel tidak konsisten
+SHOW_FACE_DISTANCE = True         # tampilkan jarak wajah di dialog kamera (untuk kalibrasi; matikan setelah demo siap)
 
 # Penguncian percobaan password (disimpan di database, tahan restart aplikasi)
 PASSWORD_MAX_ATTEMPTS = 5

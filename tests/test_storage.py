@@ -28,8 +28,8 @@ class StorageTestCase(unittest.TestCase):
         config.VAULT_DIR = self.tmp / "data" / "vault"
         config.POW_DIFFICULTY = 2   # cepat untuk tes
         with db.transaction() as conn:
-            self.uid1 = db.create_user(conn, "anggota_a", "hash", os.urandom(16), "dongle-1", b"face1")
-            self.uid2 = db.create_user(conn, "anggota_b", "hash", os.urandom(16), "dongle-2", b"face2")
+            self.uid1 = db.create_user(conn, b"enc-a", "hash", os.urandom(16), "dongle-1", b"face1")
+            self.uid2 = db.create_user(conn, b"enc-b", "hash", os.urandom(16), "dongle-2", b"face2")
         self.s1 = SimpleNamespace(user_id=self.uid1, keys=kmod.derive_keyset(os.urandom(32)))
         self.s2 = SimpleNamespace(user_id=self.uid2, keys=kmod.derive_keyset(os.urandom(32)))
 
@@ -55,10 +55,10 @@ class TestDb(StorageTestCase):
 
     def test_duplicate_user(self):
         with db.transaction() as conn:
+            # username (terenkripsi) tidak unik; yang unik hanya dongle
+            self.assertIsInstance(db.create_user(conn, b"enc-a", "h", b"s", "dongle-baru", b"f"), int)
             with self.assertRaises(UserExists):
-                db.create_user(conn, "anggota_a", "h", b"s", "dongle-baru", b"f")
-            with self.assertRaises(UserExists):
-                db.create_user(conn, "orang_baru", "h", b"s", "dongle-1", b"f")
+                db.create_user(conn, b"enc-baru", "h", b"s", "dongle-1", b"f")
 
     def test_get_user_by_dongle(self):
         with db.transaction() as conn:

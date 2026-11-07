@@ -11,6 +11,7 @@ import numpy as np
 from brankas import config
 from brankas.auth import dongle, face, login
 from brankas.errors import (
+    AmbiguousFace,
     BrankasError,
     DongleMismatch,
     DongleNotFound,
@@ -119,10 +120,12 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(session.username, "alice")
         self.assertIsNotNone(session.keys)
 
-        # Registrasi ulang dengan username yang sama harus gagal
+        # Registrasi ulang di flashdisk yang sama harus gagal dan tidak menimpa dongle.key
+        key_before = (self.dongle_dir / config.DONGLE_FILENAME).read_bytes()
         with patch("brankas.auth.face.encode_face", return_value=VEC_ALICE):
-            with self.assertRaises(UserExists):
+            with self.assertRaises(BrankasError):
                 login.register("alice", "password-dua", str(self.dongle_dir), [FRAME])
+        self.assertEqual((self.dongle_dir / config.DONGLE_FILENAME).read_bytes(), key_before)
 
         with patch("brankas.auth.face.encode_face", return_value=VEC_ALICE):
             flow = login.LoginFlow()
@@ -211,6 +214,91 @@ class TestAuth(unittest.TestCase):
             flow.step_dongle()
             flow.step_face(FRAME)
             self.assertEqual(flow.step_password("password-rahasia").keys.k_file, first.keys.k_file)
+
+    # ---------------------------------------------------------------- username terenkripsi
+    def test_username_not_plaintext_in_db(self):
+        self.register_alice()
+        raw = config.DB_PATH.read_bytes()
+        self.assertNotIn(b"alice", raw)
+        with db.transaction() as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+        self.assertIn("username_enc", cols)
+        self.assertNotIn("username", cols)
+
+    def test_username_visible_only_after_dongle_step(self):
+        self.register_alice()
+        flow = login.LoginFlow()
+        self.assertIsNone(flow.recognized_username)
+        flow.step_dongle()
+        self.assertEqual(flow.recognized_username, "alice")
+
+    def test_wrong_dongle_key_rejected_at_dongle_step(self):
+        self.register_alice()
+        (self.dongle_dir / config.DONGLE_FILENAME).write_bytes(os.urandom(32))   # serial sama, isi berbeda
+        flow = login.LoginFlow()
+        with self.assertRaises(DongleMismatch):
+            flow.step_dongle()
+        self.assertIsNone(flow.recognized_username)
+
+    def test_unicode_username_roundtrip(self):
+        with patch("brankas.auth.face.encode_face", return_value=VEC_ALICE):
+            login.register("  Adrián 你好  ", "password-rahasia", str(self.dongle_dir), [FRAME])
+        flow = login.LoginFlow()
+        flow.step_dongle()
+        self.assertEqual(flow.recognized_username, "Adrián 你好")
+
+    def test_old_schema_gives_clear_error(self):
+        import sqlite3
+        config.DB_PATH = self.temp_dir / "lama.db"      # tearDown mengembalikan DB_PATH asli
+        c = sqlite3.connect(config.DB_PATH)
+        c.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+        c.commit(); c.close()
+        try:
+            with self.assertRaises(BrankasError):
+                with db.transaction():
+                    pass
+        finally:
+            config.DB_PATH = self.db_path    # tearDown memakai DB sementara yang sehat
+
+    # ---------------------------------------------------------------- pemilihan wajah
+    def _fr(self, locations):
+        """Patch deteksi/encoding dlib; kembalikan (ctx_locations, ctx_encodings)."""
+        enc = patch.object(face.face_recognition, "face_encodings", create=True,
+                           return_value=[VEC_ALICE.copy()])
+        loc = patch.object(face.face_recognition, "face_locations", create=True, return_value=locations)
+        return loc, enc
+
+    def test_largest_face_is_used(self):
+        small, big = (0, 60, 60, 0), (10, 300, 250, 20)        # tinggi 60 px vs 240 px
+        loc, enc = self._fr([small, big])
+        with loc, enc as m_enc:
+            face.encode_face(FRAME)
+        self.assertEqual(m_enc.call_args.kwargs["known_face_locations"], [big])
+
+    def test_small_face_rejected(self):
+        loc, enc = self._fr([(0, 60, 60, 0)])
+        with loc, enc:
+            with self.assertRaises(NoFaceDetected):
+                face.encode_face(FRAME)
+
+    def test_two_similar_faces_rejected_as_ambiguous(self):
+        loc, enc = self._fr([(0, 200, 200, 0), (0, 420, 190, 230)])
+        with loc, enc:
+            with self.assertRaises(AmbiguousFace):
+                face.encode_face(FRAME)
+        with loc, enc:   # AmbiguousFace termasuk NoFaceDetected: tidak dihitung sebagai percobaan gagal
+            self.assertFalse(face.verify(FRAME, VEC_ALICE.tobytes()))
+
+    def test_no_face_rejected(self):
+        loc, enc = self._fr([])
+        with loc, enc:
+            with self.assertRaises(NoFaceDetected):
+                face.encode_face(FRAME)
+
+    def test_enroll_rejects_inconsistent_samples(self):
+        with patch("brankas.auth.face.encode_face", side_effect=[VEC_ALICE, VEC_BOB]):
+            with self.assertRaises(InvalidInput):
+                face.enroll([FRAME, FRAME])
 
     def test_register_without_face_writes_no_dongle(self):
         with patch("brankas.auth.face.encode_face", side_effect=NoFaceDetected("kosong")):

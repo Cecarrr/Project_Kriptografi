@@ -19,6 +19,7 @@ from brankas.core import crypto, keys
 from brankas.core.keys import KeySet
 from brankas.errors import (
     BrankasError,
+    DecryptionError,
     DongleMismatch,
     DongleNotFound,
     InvalidInput,
@@ -155,17 +156,19 @@ class LoginFlow:
     def __init__(self) -> None:
         self._dongle_info: DongleInfo | None = None
         self._user_row: dict[str, Any] | None = None
+        self._username: str | None = None
         self._face_verified: bool = False
         self.last_face_distance: float | None = None   # jarak wajah terakhir (untuk ditampilkan saat demo)
 
     @property
     def recognized_username(self) -> str | None:
-        return self._user_row["username"] if self._user_row else None
+        return self._username
 
     def clear(self) -> None:
         """Lepas dongle.key, baris pengguna, dan status wajah dari alur ini (dipanggil saat layar login ditutup)."""
         self._dongle_info = None
         self._user_row = None
+        self._username = None
         self._face_verified = False
         self.last_face_distance = None
 
@@ -186,8 +189,19 @@ class LoginFlow:
             log.warning("login: dongle tidak terdaftar untuk pengguna manapun")
             raise DongleMismatch("Dongle tidak dikenali atau belum terdaftar untuk pengguna manapun.")
 
+        # Username tersimpan terenkripsi dengan kunci dari dongle.key: dibuka sekarang, sebelum wajah/password.
+        # dongle.key yang salah (serial sama tetapi isi berbeda) ketahuan di langkah ini, bukan di langkah wajah.
+        try:
+            username = crypto.aes_decrypt(
+                row["username_enc"], keys.derive_username_key(dongle_info.key)
+            ).decode("utf-8")
+        except (DecryptionError, UnicodeDecodeError):
+            log.warning("login: dongle.key tidak cocok dengan akun user=%s", row["id"])
+            raise DongleMismatch("Isi dongle.key tidak cocok dengan akun yang terdaftar untuk flashdisk ini.") from None
+
         self._dongle_info = dongle_info
         self._user_row = dict(row)
+        self._username = username
         self._face_verified = False
         log.info("login: dongle dikenali user=%s", self._user_row["id"])
         return dongle_info
@@ -240,7 +254,7 @@ class LoginFlow:
         log.info("login: berhasil user=%s", uid)
         return Session(
             user_id=self._user_row["id"],
-            username=self._user_row["username"],
+            username=self._username or "",
             keys=key_set,
             dongle=self._dongle_info,
         )
@@ -248,7 +262,7 @@ class LoginFlow:
 
 def register(username: str, password: str, drive: str,
              face_frames: list[np.ndarray]) -> Session:
-    """Registrasi akun baru: enroll wajah, tulis dongle, simpan user. UserExists bila duplikat.
+    """Registrasi akun baru: enroll wajah, tulis dongle, simpan user. UserExists bila flashdisk sudah terdaftar.
 
     Urutan sengaja dibuat aman: semua pemeriksaan dan langkah yang bisa gagal dilakukan SEBELUM
     dongle.key ditulis, dan dongle.key yang baru ditulis dihapus lagi bila penyimpanan gagal.
@@ -263,9 +277,7 @@ def register(username: str, password: str, drive: str,
         raise InvalidInput("Dibutuhkan minimal satu sampel wajah untuk registrasi")
 
     # 1. Pemeriksaan tanpa menulis apa pun
-    with db.transaction() as conn:
-        if conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
-            raise UserExists(f"Username '{username}' sudah terdaftar")
+    # Username tidak perlu unik (disimpan terenkripsi; satu dongle = satu akun, dijaga lewat serial dongle).
     serial_hash = dongle.preflight(drive)    # drive valid? removable? belum berisi dongle.key?
     with db.transaction() as conn:
         if db.get_user_by_dongle(conn, serial_hash):
@@ -279,6 +291,7 @@ def register(username: str, password: str, drive: str,
     try:
         k_face = keys.derive_face_key(dongle_info.key)
         face_enc = crypto.aes_encrypt(face_bytes, k_face)
+        username_enc = crypto.aes_encrypt(username.encode("utf-8"), keys.derive_username_key(dongle_info.key))
 
         password_hash = keys.hash_password(password)
         salt_kdf = keys.new_salt()
@@ -289,7 +302,7 @@ def register(username: str, password: str, drive: str,
         with db.transaction() as conn:
             user_id = db.create_user(
                 conn,
-                username=username,
+                username_enc=username_enc,
                 password_hash=password_hash,
                 salt_kdf=salt_kdf,
                 dongle_serial_hash=dongle_info.serial_hash,

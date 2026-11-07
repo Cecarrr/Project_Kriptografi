@@ -202,6 +202,13 @@ class CameraPreviewDialog(ctk.CTkToplevel):
         else:
             self._handle_register_capture(frame)
 
+    def _distance_note(self) -> str:
+        """Jarak wajah terakhir (untuk kalibrasi; dimatikan lewat config.SHOW_FACE_DISTANCE)."""
+        d = self.flow.last_face_distance if self.flow else None
+        if d is None or not config.SHOW_FACE_DISTANCE:
+            return ""
+        return f"\nJarak wajah: {d:.3f} (batas {config.FACE_TOLERANCE})"
+
     def _handle_login_capture(self, frame: np.ndarray) -> None:
         if not self.flow:
             return
@@ -210,7 +217,7 @@ class CameraPreviewDialog(ctk.CTkToplevel):
             matched = self.flow.step_face(frame)
             if matched:
                 self.label_status.configure(
-                    text="✔ Wajah Cocok & Berhasil Terverifikasi! (Menutup kamera...)",
+                    text="✔ Wajah Cocok & Berhasil Terverifikasi! (Menutup kamera...)" + self._distance_note(),
                     text_color=_COLOR_SUCCESS,
                 )
                 self.btn_capture.configure(state="disabled")
@@ -222,7 +229,7 @@ class CameraPreviewDialog(ctk.CTkToplevel):
                 sisa = config.FACE_MAX_ATTEMPTS - self._face_attempts
                 if sisa <= 0:
                     self.label_status.configure(
-                        text="❌ Batas percobaan verifikasi wajah telah habis!",
+                        text="❌ Batas percobaan verifikasi wajah telah habis!" + self._distance_note(),
                         text_color=_COLOR_ERROR,
                     )
                     self.btn_capture.configure(state="disabled")
@@ -232,12 +239,12 @@ class CameraPreviewDialog(ctk.CTkToplevel):
                     self._on_close()
                 else:
                     self.label_status.configure(
-                        text=f"❌ Wajah Tidak Cocok! Sisa percobaan: {sisa}. Silakan arahkan wajah kembali.",
+                        text=f"❌ Wajah Tidak Cocok! Sisa percobaan: {sisa}. Silakan arahkan wajah kembali." + self._distance_note(),
                         text_color=_COLOR_ERROR,
                     )
-        except NoFaceDetected:
+        except NoFaceDetected as e:
             self.label_status.configure(
-                text="⚠️ Tidak ada wajah yang terdeteksi di kamera! Pastikan wajah Anda terlihat jelas.",
+                text=f"⚠️ {e}",
                 text_color=_COLOR_WARNING,
             )
         except Exception as e:
@@ -267,9 +274,9 @@ class CameraPreviewDialog(ctk.CTkToplevel):
                     text=f"✔ Sampel ke-{n} berhasil dicatat! Arahkan wajah sedikit berbeda lalu ambil sampel ke-{n+1}/{target}.",
                     text_color=_COLOR_SUCCESS,
                 )
-        except NoFaceDetected:
+        except NoFaceDetected as e:
             self.label_status.configure(
-                text="⚠️ Tidak ada wajah yang terdeteksi di kamera! Harap hadap kamera dengan pencahayaan cukup.",
+                text=f"⚠️ {e}",
                 text_color=_COLOR_WARNING,
             )
         except Exception as e:
