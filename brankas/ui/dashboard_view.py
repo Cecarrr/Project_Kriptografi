@@ -1,4 +1,5 @@
-"""Layar utama setelah login: dokumen, catatan, verifikasi blockchain. Pemilik: Anggota B.
+"""Layar utama setelah login: dokumen (cari, urut, pratinjau), catatan, blockchain, log audit, inspektur.
+Pemilik: Anggota B.
 
 Pemakaian:
     view = DashboardView(master, session, on_logout=callback)
@@ -11,9 +12,8 @@ Anggota A dapat menambah tab sendiri lewat view.tabview, mis.:
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 from typing import TYPE_CHECKING, Callable
 
 import customtkinter as ctk
@@ -21,8 +21,20 @@ import customtkinter as ctk
 from brankas import config
 from brankas.chain import blockchain
 from brankas.errors import BrankasError
-from brankas.storage import db, documents, notes
+from brankas.storage import db, documents, notes, preview
+from brankas.ui.audit_view import AuditView
+from brankas.ui.inspector_view import InspectorView
 from brankas.ui.stego_view import StegoView
+from brankas.ui.widgets import (
+    GREEN as _GREEN,
+    MUTED as _MUTED,
+    RED as _RED,
+    apply_tree_style as _apply_tree_style,
+    fmt_size as _fmt_size,
+    fmt_time as _fmt_time,
+    make_tree as _make_tree,
+    set_text as _set_text,
+)
 
 if TYPE_CHECKING:
     from brankas.auth.login import Session
@@ -87,6 +99,7 @@ def _set_text(box: ctk.CTkTextbox, text: str) -> None:
     box.delete("1.0", "end")
     box.insert("1.0", text)
     box.configure(state="disabled")
+log = get_logger("dashboard")
 
 
 # ---------------------------------------------------------------- tampilan utama
@@ -97,6 +110,13 @@ class DashboardView(ctk.CTkFrame):
         self.session = session
         self.on_logout = on_logout
         self._notes: dict[str, notes.Note] = {}
+        self._last_verify: blockchain.VerifyResult | None = None
+        self._verify_queue: queue.Queue = queue.Queue()
+        self._verify_poll_id: str | None = None
+        self._docs: list[documents.DocInfo] = []          # cache daftar dokumen (nama sudah didekripsi)
+        self._doc_sort: tuple[str, bool] = ("created", True)   # (kolom, menurun?)
+        self._doc_query = ctk.StringVar(master=self)
+        self._preview_image = None                         # referensi CTkImage agar tidak di-GC
 
         _apply_tree_style()
         self.grid_columnconfigure(0, weight=1)
@@ -108,7 +128,12 @@ class DashboardView(ctk.CTkFrame):
         self._build_notes_tab(self.tabview.add("Catatan"))
         self._build_chain_tab(self.tabview.add("Blockchain"))
         stego_tab = self.tabview.add("Steganografi")
-        StegoView(stego_tab, self.session).pack(fill="both", expand=True)
+        self.stego_view = StegoView(stego_tab, self.session)
+        self.stego_view.pack(fill="both", expand=True)
+        self.audit_view = AuditView(self.tabview.add("Log Audit"), self.session, guard=self._guard)
+        self.audit_view.pack(fill="both", expand=True)
+        self.inspector_view = InspectorView(self.tabview.add("Inspektur"), self.session, guard=self._guard)
+        self.inspector_view.pack(fill="both", expand=True)
         self.refresh_all()
 
     # ------------------------------------------------------------ utilitas
@@ -123,10 +148,39 @@ class DashboardView(ctk.CTkFrame):
             messagebox.showerror("Kesalahan tak terduga", f"{type(e).__name__}: {e}",
                                  parent=self.winfo_toplevel())
 
+    def wipe_sensitive(self) -> None:
+        """Hapus data terdekripsi (daftar dokumen, isi catatan, hasil stego) dari widget.
+        Dipanggil app.py sebelum layar ditutup saat logout / dongle dicabut."""
+        try:
+            self._notes = {}
+            self._last_verify = None
+            self.doc_tree.delete(*self.doc_tree.get_children())
+            self.note_tree.delete(*self.note_tree.get_children())
+            _set_text(self.note_view, "")
+            self.note_input.delete("1.0", "end")
+            self._docs = []
+            self._doc_query.set("")
+            self._close_preview()
+            self.audit_view.wipe_sensitive()
+            self.inspector_view.wipe_sensitive()
+            self.stego_view.wipe_sensitive()
+        except Exception:  # noqa: BLE001  (widget mungkin sudah dihancurkan)
+            log.exception("gagal membersihkan widget dashboard")
+
+    def destroy(self) -> None:
+        if self._verify_poll_id is not None:
+            try:
+                self.after_cancel(self._verify_poll_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._verify_poll_id = None
+        super().destroy()
+
     def refresh_all(self) -> None:
         self._refresh_docs()
         self._refresh_notes()
         self._refresh_chain()
+        self.audit_view.refresh()
 
     def _build_header(self) -> None:
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -145,24 +199,131 @@ class DashboardView(ctk.CTkFrame):
         ctk.CTkButton(bar, text="Hapus", width=110, fg_color=_RED, hover_color="#8e1f1f",
                       command=self._delete_docs).pack(side="left", padx=6)
         ctk.CTkButton(bar, text="Segarkan", width=100, command=self._refresh_docs).pack(side="left", padx=6)
+        ctk.CTkButton(bar, text="Pratinjau", width=110, command=self._preview).pack(side="left", padx=6)
         self.doc_status = ctk.CTkLabel(bar, text="", anchor="e")
         self.doc_status.pack(side="right")
 
+        search = ctk.CTkFrame(tab, fg_color="transparent")
+        search.pack(fill="x", padx=8, pady=(0, 4))
+        ctk.CTkEntry(search, textvariable=self._doc_query, placeholder_text="Cari nama file...").pack(
+            side="left", fill="x", expand=True)
+        ctk.CTkButton(search, text="Hapus pencarian", width=130, fg_color="transparent", border_width=1,
+                      text_color=_MUTED, command=lambda: self._doc_query.set("")).pack(side="left", padx=(6, 0))
+        self._doc_query.trace_add("write", lambda *_: self._render_docs())
+
+        self._doc_titles = {"name": "Nama", "type": "Jenis", "size": "Ukuran", "created": "Ditambahkan"}
         frame, self.doc_tree = _make_tree(
             tab,
             [("name", "Nama", 320), ("type", "Jenis", 70), ("size", "Ukuran", 90), ("created", "Ditambahkan", 150)],
             selectmode="extended",
         )
+        for cid in self._doc_titles:
+            self.doc_tree.heading(cid, command=lambda c=cid: self._sort_docs_by(c))
+        self.doc_tree.bind("<Double-1>", self._on_doc_double_click)
+        self._doc_tree_frame = frame
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        # panel pratinjau: dibuat tersembunyi, muncul di bawah daftar saat dipakai
+        self.preview_frame = ctk.CTkFrame(tab)
+        head = ctk.CTkFrame(self.preview_frame, fg_color="transparent")
+        head.pack(fill="x", padx=8, pady=(6, 0))
+        self.preview_title = ctk.CTkLabel(head, text="", anchor="w", font=ctk.CTkFont(weight="bold"))
+        self.preview_title.pack(side="left")
+        ctk.CTkButton(head, text="Tutup", width=70, command=self._close_preview).pack(side="right")
+        ctk.CTkLabel(self.preview_frame, text="Didekripsi hanya di memori; tidak ada file yang ditulis ke disk.",
+                     anchor="w", text_color=_MUTED, font=ctk.CTkFont(size=11)).pack(fill="x", padx=10)
+        self.preview_body = ctk.CTkFrame(self.preview_frame, fg_color="transparent")
+        self.preview_body.pack(fill="both", expand=True, padx=8, pady=(2, 8))
+
+    # -- daftar: cari dan urut kolom (di memori; nama file sudah didekripsi)
+    _DOC_SORT_KEYS = {
+        "name": lambda d: d.filename.casefold(),
+        "type": lambda d: (d.file_type, d.filename.casefold()),
+        "size": lambda d: d.size,                 # angka, bukan teks "1.2 MB"
+        "created": lambda d: d.created_at,        # "YYYY-MM-DD HH:MM:SS" urut benar sebagai teks
+    }
 
     def _refresh_docs(self) -> None:
         with self._guard():
-            docs = documents.list_documents(self.session)
-            self.doc_tree.delete(*self.doc_tree.get_children())
-            for d in docs:
-                self.doc_tree.insert("", "end", iid=d.id,
-                                     values=(d.filename, d.file_type, _fmt_size(d.size), _fmt_time(d.created_at)))
-            self.doc_status.configure(text=f"{len(docs)} dokumen")
+            self._docs = documents.list_documents(self.session)
+            self._render_docs()
+
+    def _render_docs(self) -> None:
+        col, desc = self._doc_sort
+        query = self._doc_query.get().strip().casefold()
+        shown = [d for d in self._docs if query in d.filename.casefold()] if query else list(self._docs)
+        shown.sort(key=self._DOC_SORT_KEYS[col], reverse=desc)    # sort stabil: urutan awal terjaga saat seri
+
+        selected = set(self.doc_tree.selection())
+        self.doc_tree.delete(*self.doc_tree.get_children())
+        for d in shown:
+            self.doc_tree.insert("", "end", iid=d.id,
+                                 values=(d.filename, d.file_type, _fmt_size(d.size), _fmt_time(d.created_at)))
+        keep = [d.id for d in shown if d.id in selected]
+        if keep:
+            self.doc_tree.selection_set(keep)
+        for cid, title in self._doc_titles.items():
+            arrow = (" \u25bc" if desc else " \u25b2") if cid == col else ""
+            self.doc_tree.heading(cid, text=title + arrow)
+        total = len(self._docs)
+        self.doc_status.configure(text=f"{len(shown)} dari {total} dokumen" if query else f"{total} dokumen")
+
+    def _sort_docs_by(self, col: str) -> None:
+        cur, desc = self._doc_sort
+        # klik kolom yang sama membalik arah; kolom baru: ukuran dan tanggal mulai dari terbesar/terbaru
+        self._doc_sort = (col, not desc) if col == cur else (col, col in ("size", "created"))
+        self._render_docs()
+
+    # -- pratinjau di memori
+    def _on_doc_double_click(self, event) -> None:
+        if self.doc_tree.identify_region(event.x, event.y) == "cell":
+            self._preview()
+
+    def _preview(self) -> None:
+        sel = self.doc_tree.selection()
+        if len(sel) != 1:
+            messagebox.showinfo("Pratinjau", "Pilih tepat satu dokumen.", parent=self.winfo_toplevel())
+            return
+        doc_id = sel[0]
+        name = self.doc_tree.set(doc_id, "name")
+        ext = self.doc_tree.set(doc_id, "type")
+        with self._guard("Pratinjau"):
+            data = documents.read_document(self.session, doc_id)
+            self._show_preview(name, ext, data)
+            self.audit_view.refresh()
+
+    def _show_preview(self, name: str, ext: str, data: bytes) -> None:
+        self._clear_preview_body()
+        kind = preview.kind_of(ext)
+        title = f"Pratinjau: {name}"
+        if kind == "image":
+            img, original = preview.load_image(data)
+            self._preview_image = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+            ctk.CTkLabel(self.preview_body, text="", image=self._preview_image).pack(pady=4)
+            title += f"  ({original[0]}\u00d7{original[1]} px)"
+        else:
+            if kind == "text":
+                text = preview.text_from_bytes(data)
+            elif kind == "docx":
+                text = preview.docx_to_text(data)
+            else:
+                text = f"Pratinjau belum tersedia untuk jenis file {ext or '(tanpa ekstensi)'}. Gunakan Unduh."
+            box = ctk.CTkTextbox(self.preview_body, height=170, wrap="word", state="disabled")
+            box.pack(fill="both", expand=True)
+            _set_text(box, text)
+        self.preview_title.configure(text=title)
+        self.preview_frame.pack(side="bottom", fill="x", padx=8, pady=(0, 8), before=self._doc_tree_frame)
+
+    def _clear_preview_body(self) -> None:
+        # widget dibuat ulang tiap pratinjau: configure(image=None) pada CTkLabel bisa memicu TclError
+        for child in self.preview_body.winfo_children():
+            child.destroy()
+        self._preview_image = None
+
+    def _close_preview(self) -> None:
+        self._clear_preview_body()
+        self.preview_title.configure(text="")
+        self.preview_frame.pack_forget()
 
     def _upload(self) -> None:
         exts = " ".join(f"*{e}" for e in sorted(config.ALLOWED_DOC_EXT))
@@ -201,6 +362,7 @@ class DashboardView(ctk.CTkFrame):
             return
         with self._guard():
             documents.export_document(self.session, sel[0], Path(dest))
+            self.audit_view.refresh()
             messagebox.showinfo("Unduh", "Dokumen berhasil didekripsi dan disimpan.",
                                 parent=self.winfo_toplevel())
 

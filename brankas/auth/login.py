@@ -24,15 +24,77 @@ from brankas.errors import (
     UserExists,
     WrongPassword,
 )
-from brankas.storage import db
+from brankas.storage import audit, db
 
 
-@dataclass
+def _audit_event(user_id: int, action: str) -> None:
+    """Catat peristiwa sesi (LOGIN / LOGOUT) di log audit. Sengaja tidak melempar error: kegagalan
+    mencatat tidak boleh menggagalkan login, dan lock() harus selalu berhasil melepas kunci."""
+    try:
+        with db.transaction() as conn:
+            audit.record(conn, user_id, action)
+    except Exception:  # noqa: BLE001
+        log.exception("gagal mencatat log audit action=%s user=%s", action, user_id)
+
+
 class Session:
-    user_id: int
-    username: str
-    keys: KeySet
-    dongle: DongleInfo
+    """Sesi pengguna yang sudah masuk. Membawa KeySet dan DongleInfo (berisi dongle.key).
+
+    lock() dipanggil saat logout / dongle dicabut / aplikasi ditutup: referensi kunci dilepas dan
+    semua akses berikutnya ke `keys` atau `dongle` melempar SessionLocked, sehingga tampilan yang
+    masih menggenggam objek ini tidak bisa lagi mendekripsi apa pun.
+
+    Catatan jujur: Python memakai bytes yang immutable, jadi kunci tidak bisa ditimpa dengan nol di
+    memori. lock() melepas semua referensi yang kita pegang lalu memanggil gc.collect(); salinan
+    yang sudah dibuat pustaka kripto bisa saja masih tertinggal sampai memori dipakai ulang (best effort).
+    """
+
+    def __init__(self, user_id: int, username: str, keys: KeySet, dongle: DongleInfo) -> None:
+        self.user_id = user_id
+        self.username = username
+        self._keys: KeySet | None = keys
+        self._dongle: DongleInfo | None = dongle
+
+    @property
+    def locked(self) -> bool:
+        return self._keys is None
+
+    @property
+    def keys(self) -> KeySet:
+        if self._keys is None:
+            raise SessionLocked("Sesi sudah dikunci. Silakan masuk kembali.")
+        return self._keys
+
+    @property
+    def dongle(self) -> DongleInfo:
+        if self._dongle is None:
+            raise SessionLocked("Sesi sudah dikunci. Silakan masuk kembali.")
+        return self._dongle
+
+    def lock(self) -> None:
+        """Lepas kunci dari sesi. Aman dipanggil berulang."""
+        was_locked = self.locked
+        self._keys = None
+        self._dongle = None
+        gc.collect()
+        if not was_locked:
+            log.info("sesi dikunci user=%s", self.user_id)
+            _audit_event(self.user_id, "LOGOUT")
+
+    def __repr__(self) -> str:   # tidak pernah mencetak kunci
+        return f"Session(user_id={self.user_id!r}, username={self.username!r}, locked={self.locked})"
+
+
+def password_problem(password: str) -> str | None:
+    """Kebijakan password. Kembalikan pesan masalah (bahasa Indonesia, siap ditampilkan) atau None bila lolos."""
+    if not password:
+        return "Password tidak boleh kosong."
+    if len(password) < config.PASSWORD_MIN_LENGTH:
+        return (f"Password terlalu pendek: minimal {config.PASSWORD_MIN_LENGTH} karakter "
+                f"(saat ini {len(password)}).")
+    if not password.strip():
+        return "Password tidak boleh hanya berisi spasi."
+    return None
 
 
 class _Lockout:
@@ -158,12 +220,15 @@ class LoginFlow:
         master_key = keys.derive_master_key(pw_key, self._dongle_info.key)
         key_set = keys.derive_keyset(master_key)
 
-        return Session(
+        log.info("login: berhasil user=%s", uid)
+        session = Session(
             user_id=self._user_row["id"],
             username=self._user_row["username"],
             keys=key_set,
             dongle=self._dongle_info,
         )
+        _audit_event(uid, "LOGIN")
+        return session
 
 
 def register(username: str, password: str, drive: str,
@@ -218,4 +283,7 @@ def register(username: str, password: str, drive: str,
         dongle.discard_dongle(dongle_info)
         raise
 
-    return Session(user_id=user_id, username=username, keys=key_set, dongle=dongle_info)
+    log.info("registrasi: akun baru user=%s", user_id)
+    session = Session(user_id=user_id, username=username, keys=key_set, dongle=dongle_info)
+    _audit_event(user_id, "LOGIN")   # registrasi langsung membuka sesi
+    return session
