@@ -16,7 +16,7 @@ from brankas.applog import get_logger
 from brankas.chain import blockchain
 from brankas.core import crypto
 from brankas.errors import DecryptionError, FileTooLarge, ItemNotFound, UnsupportedFileType
-from brankas.storage import db
+from brankas.storage import audit, db
 from brankas.storage.vault import safe_vault_path
 
 log = get_logger("documents")
@@ -102,16 +102,37 @@ def list_documents(session: Session) -> list[DocInfo]:
     return result
 
 
-def export_document(session: Session, doc_id: str, dest_path: Path) -> None:
-    """Dekripsi dan tulis ke dest_path. DecryptionError bila file rusak/kunci salah."""
+def _decrypt_owned(session: Session, doc_id: str) -> bytes:
+    """Dekripsi dokumen milik session ke memori (tidak menulis apa pun ke disk)."""
     with db.transaction() as conn:
         row = _get_owned(conn, session, doc_id)
     path = safe_vault_path(config.VAULT_DIR, row["stored_path"])   # UnsafePath bila baris DB dimanipulasi
     if not path.is_file():
         raise ItemNotFound("File terenkripsi hilang dari vault")
-    data = crypto.decrypt_file(path.read_bytes(), session.keys)
+    return crypto.decrypt_file(path.read_bytes(), session.keys)
+
+
+def _audit(session: Session, action: str, doc_id: str) -> None:
+    with db.transaction() as conn:
+        audit.record(conn, session.user_id, action, doc_id)
+
+
+def export_document(session: Session, doc_id: str, dest_path: Path) -> None:
+    """Dekripsi dan tulis ke dest_path. DecryptionError bila file rusak/kunci salah."""
+    data = _decrypt_owned(session, doc_id)
+    # Dicatat SEBELUM plaintext keluar dari aplikasi: bila pencatatan gagal, tidak ada yang tertulis.
+    _audit(session, "UNDUH", doc_id)
     Path(dest_path).write_bytes(data)
     log.info("unduh dokumen id=%s user=%s", doc_id, session.user_id)
+
+
+def read_document(session: Session, doc_id: str) -> bytes:
+    """Dekripsi ke memori untuk pratinjau; tidak ada berkas plaintext yang ditulis ke disk.
+    Pemanggil menampilkan lalu membuang bytes-nya. DecryptionError bila file rusak/kunci salah."""
+    data = _decrypt_owned(session, doc_id)
+    _audit(session, "PRATINJAU", doc_id)   # dicatat sebelum data dikembalikan
+    log.info("pratinjau dokumen id=%s user=%s", doc_id, session.user_id)
+    return data
 
 
 def delete_document(session: Session, doc_id: str) -> None:

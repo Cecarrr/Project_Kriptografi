@@ -48,6 +48,15 @@ CREATE TABLE IF NOT EXISTS chain (
     nonce INTEGER NOT NULL,
     hash TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS audit (
+    idx INTEGER PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    action TEXT NOT NULL,                 -- GENESIS / LOGIN / LOGOUT / UNDUH / PRATINJAU
+    doc_id TEXT NOT NULL,                 -- "-" bila tidak terkait dokumen
+    prev_hash TEXT NOT NULL,
+    hash TEXT NOT NULL                    -- SHA-256 berantai, tanpa proof-of-work
+);
 CREATE TABLE IF NOT EXISTS lockouts (
     key TEXT PRIMARY KEY,                 -- mis. "face:3" / "password:3" (jenis:user_id)
     failures INTEGER NOT NULL DEFAULT 0,

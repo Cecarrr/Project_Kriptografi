@@ -27,9 +27,19 @@ from brankas.errors import (
     UserExists,
     WrongPassword,
 )
-from brankas.storage import db
+from brankas.storage import audit, db
 
 log = get_logger("login")
+
+
+def _audit_event(user_id: int, action: str) -> None:
+    """Catat peristiwa sesi (LOGIN / LOGOUT) di log audit. Sengaja tidak melempar error: kegagalan
+    mencatat tidak boleh menggagalkan login, dan lock() harus selalu berhasil melepas kunci."""
+    try:
+        with db.transaction() as conn:
+            audit.record(conn, user_id, action)
+    except Exception:  # noqa: BLE001
+        log.exception("gagal mencatat log audit action=%s user=%s", action, user_id)
 
 
 class Session:
@@ -74,6 +84,7 @@ class Session:
         gc.collect()
         if not was_locked:
             log.info("sesi dikunci user=%s", self.user_id)
+            _audit_event(self.user_id, "LOGOUT")
 
     def __repr__(self) -> str:   # tidak pernah mencetak kunci
         return f"Session(user_id={self.user_id!r}, username={self.username!r}, locked={self.locked})"
@@ -257,12 +268,14 @@ class LoginFlow:
         key_set = keys.derive_keyset(master_key)
 
         log.info("login: berhasil user=%s", uid)
-        return Session(
+        session = Session(
             user_id=self._user_row["id"],
             username=self._username or "",
             keys=key_set,
             dongle=self._dongle_info,
         )
+        _audit_event(uid, "LOGIN")
+        return session
 
 
 def register(username: str, password: str, drive: str,
@@ -318,4 +331,6 @@ def register(username: str, password: str, drive: str,
         raise
 
     log.info("registrasi: akun baru user=%s", user_id)
-    return Session(user_id=user_id, username=username, keys=key_set, dongle=dongle_info)
+    session = Session(user_id=user_id, username=username, keys=key_set, dongle=dongle_info)
+    _audit_event(user_id, "LOGIN")   # registrasi langsung membuka sesi
+    return session
