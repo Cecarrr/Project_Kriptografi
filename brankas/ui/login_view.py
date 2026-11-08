@@ -387,11 +387,19 @@ class LoginView(ctk.CTkFrame):
         )
         self.btn_browse_dongle.pack(side="right", padx=6)
 
+        d = dongle.dev_dir()
+        if d is not None:
+            status_text = f"Mode Development Aktif (Virtual Dongle di: {d}). Klik 'Periksa Dongle'."
+            status_color = _COLOR_SUCCESS
+        else:
+            status_text = "Silakan colokkan flashdisk dongle Anda, lalu klik 'Periksa Dongle'."
+            status_color = _COLOR_MUTED
+
         self.label_dongle_status = ctk.CTkLabel(
             self.card_dongle,
-            text="Silakan colokkan flashdisk dongle Anda, lalu klik 'Periksa Dongle'.",
+            text=status_text,
             font=ctk.CTkFont(size=12),
-            text_color=_COLOR_MUTED,
+            text_color=status_color,
             anchor="w",
         )
         self.label_dongle_status.pack(fill="x", padx=14, pady=(0, 12))
@@ -512,6 +520,10 @@ class LoginView(ctk.CTkFrame):
         self._check_dongle_path(None)
 
     def _do_browse_dongle(self) -> None:
+        dev_path = dongle.dev_dir()
+        if dev_path is not None:
+            self._check_dongle_path(str(dev_path))
+            return
         folder = filedialog.askdirectory(title="Pilih Lokasi Berkas dongle.key", parent=self.winfo_toplevel())
         if folder:
             self._check_dongle_path(folder)
@@ -840,6 +852,23 @@ class LoginView(ctk.CTkFrame):
         self.label_reg_samples.configure(text=text, text_color=color)
 
     def _refresh_drives(self) -> None:
+        dev_path = dongle.dev_dir()
+
+        # Mode development
+        if dev_path is not None:
+            dev_path.mkdir(parents=True, exist_ok=True)
+            path = str(dev_path.resolve())
+
+            self.opt_drives.configure(values=[path], state="disabled")
+            self.opt_drives.set(path)
+            self.label_drive_selected.configure(
+                text=f"Mode Development Aktif: Dongle berupa berkas di {path} (Serial: {dongle.DEV_SERIAL})",
+                text_color=_COLOR_SUCCESS,
+            )
+            return
+
+        # Mode normal
+        self.opt_drives.configure(state="normal")
         removables = dongle.list_removable_drives()
         if removables:
             self.opt_drives.configure(values=removables)
@@ -849,14 +878,21 @@ class LoginView(ctk.CTkFrame):
                 text_color=_COLOR_SUCCESS,
             )
         else:
-            self.opt_drives.configure(values=["Tidak ada flashdisk terdeteksi"])
-            self.opt_drives.set("Tidak ada flashdisk terdeteksi")
+            self.opt_drives.configure(values=["Tidak ada drive terdeteksi"])
+            self.opt_drives.set("Tidak ada drive terdeteksi")
             self.label_drive_selected.configure(
-                text="Tidak ada USB removable aktif. Colokkan flashdisk atau klik 'Pilih Folder Drive...'.",
+                text="Tidak ada drive terdeteksi.",
                 text_color=_COLOR_MUTED,
             )
 
     def _browse_custom_drive(self) -> None:
+        if dongle.dev_dir() is not None:
+            messagebox.showinfo(
+                "Mode Development",
+                f"Mode development sedang aktif. Lokasi dongle terkunci pada folder: {dongle.dev_dir()}",
+                parent=self.winfo_toplevel(),
+            )
+            return
         folder = filedialog.askdirectory(title="Pilih Drive / Folder Dongle", parent=self.winfo_toplevel())
         if folder:
             cur_vals = list(self.opt_drives.cget("values"))

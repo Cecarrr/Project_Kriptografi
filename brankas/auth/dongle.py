@@ -95,6 +95,8 @@ def _partition_is_removable(p) -> bool:
 
 def list_removable_drives() -> list[str]:
     """Daftar mountpoint drive removable yang aktif dan memiliki media."""
+    if dev_dir() is not None:
+        return []  # Mode dev: terisolasi penuh, abaikan removable drives fisik
     drives: list[str] = []
     for p in psutil.disk_partitions(all=False):
         if not p.fstype:  # abaikan slot card reader kosong tanpa media
@@ -152,6 +154,11 @@ def _read_key(key_file: Path) -> bytes:
 # ------------------------------------------------------------------ API publik
 def load_dongle(path) -> DongleInfo:
     """Muat dongle dari drive/folder tertentu. Dipakai pencarian otomatis dan pilihan manual."""
+    d = dev_dir()
+    if d is not None and not _in_dev_dir(path):
+        raise DongleNotFound(
+            f"Mode development aktif: hanya folder development ({d}) yang dapat digunakan sebagai dongle."
+        )
     root = mount_root(path)
     _require_removable(root)
     key_file = _find_key_file(Path(path)) or _find_key_file(Path(root))
@@ -180,7 +187,14 @@ def find_dongle() -> DongleInfo | None:
 
 def preflight(drive: str) -> str:
     """Periksa drive untuk dijadikan dongle TANPA menulis apa pun. Mengembalikan serial_hash."""
-    if not Path(drive).exists():
+    d = dev_dir()
+    if d is not None and not _in_dev_dir(drive):
+        raise BrankasError(
+            f"Mode development aktif: registrasi dongle hanya diizinkan pada folder development ({d})."
+        )
+    if _in_dev_dir(drive):
+        Path(drive).mkdir(parents=True, exist_ok=True)
+    elif not Path(drive).exists():
         raise DongleNotFound(f"Drive/lokasi {drive} tidak ditemukan")
     root = mount_root(drive)
     _require_removable(root)
@@ -196,6 +210,11 @@ def preflight(drive: str) -> str:
 def provision_dongle(drive: str) -> DongleInfo:
     """Registrasi: tulis dongle.key (32 B acak) ke ROOT drive, kembalikan DongleInfo.
     Menolak bila dongle.key sudah ada (tidak pernah menimpa)."""
+    d = dev_dir()
+    if d is not None and not _in_dev_dir(drive):
+        raise BrankasError(
+            f"Mode development aktif: registrasi dongle hanya diizinkan pada folder development ({d})."
+        )
     serial_hash = preflight(drive)
     root = mount_root(drive)
     serial = read_volume_serial(root)

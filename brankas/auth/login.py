@@ -100,6 +100,11 @@ class LoginFlow:
         else:
             dongle_info = dongle.find_dongle()
             if not dongle_info:
+                d = dongle.dev_dir()
+                if d is not None:
+                    raise DongleNotFound(
+                        f"Berkas {config.DONGLE_FILENAME} tidak ditemukan di folder development ({d})."
+                    )
                 raise DongleNotFound("Flashdisk dongle tidak ditemukan. Pastikan flashdisk terpasang.")
 
         with db.transaction() as conn:
