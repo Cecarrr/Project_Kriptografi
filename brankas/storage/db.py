@@ -10,12 +10,12 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from brankas import config
-from brankas.errors import UserExists
+from brankas.errors import BrankasError, UserExists
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
+    username_enc BLOB NOT NULL,           -- AES-GCM(k_username dari dongle.key); tidak unik: satu dongle = satu akun
     password_hash TEXT NOT NULL,          -- Argon2id
     salt_kdf BLOB NOT NULL,               -- salt untuk derive_pw_key
     dongle_serial_hash TEXT UNIQUE NOT NULL,
@@ -80,6 +80,10 @@ def init_db(conn: sqlite3.Connection) -> None:
     """Jalankan SCHEMA (aman dipanggil berulang)."""
     conn.executescript(SCHEMA)
     conn.commit()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+    if "username_enc" not in cols:   # basis data uji lama (kolom `username` polos); tidak bisa dimigrasi tanpa dongle
+        raise BrankasError("Skema basis data lama terdeteksi (username belum terenkripsi). "
+                           "Hapus folder data/ lalu daftarkan ulang akun.")
 
 
 @contextmanager
@@ -98,18 +102,19 @@ def transaction(db_path: str | Path | None = None):
 
 
 # ---- users (dipakai auth/login.py) ----
-def create_user(conn, username: str, password_hash: str, salt_kdf: bytes,
+def create_user(conn, username_enc: bytes, password_hash: str, salt_kdf: bytes,
                 dongle_serial_hash: str, face_enc: bytes) -> int:
-    """Kembalikan user_id (sudah di-commit). Melempar errors.UserExists bila username/dongle sudah ada."""
+    """Kembalikan user_id (sudah di-commit). Melempar errors.UserExists bila dongle sudah terdaftar.
+    Username tidak unik (disimpan terenkripsi); keunikan akun dijamin oleh dongle_serial_hash."""
     try:
         cur = conn.execute(
-            "INSERT INTO users (username, password_hash, salt_kdf, dongle_serial_hash, face_enc) "
+            "INSERT INTO users (username_enc, password_hash, salt_kdf, dongle_serial_hash, face_enc) "
             "VALUES (?, ?, ?, ?, ?)",
-            (username, password_hash, salt_kdf, dongle_serial_hash, face_enc),
+            (username_enc, password_hash, salt_kdf, dongle_serial_hash, face_enc),
         )
     except sqlite3.IntegrityError:
         conn.rollback()
-        raise UserExists("Username atau dongle ini sudah terdaftar") from None
+        raise UserExists("Flashdisk dongle ini sudah terdaftar") from None
     conn.commit()
     return cur.lastrowid
 
@@ -122,3 +127,26 @@ def get_user_by_dongle(conn, dongle_serial_hash: str) -> sqlite3.Row | None:
 
 def get_user(conn, user_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+
+# ---- lockouts (dipakai auth/login.py; tahan restart aplikasi) ----
+def get_lockout(conn, key: str) -> tuple[int, float]:
+    """(jumlah gagal berturut-turut, locked_until epoch). (0, 0.0) bila belum ada."""
+    row = conn.execute("SELECT failures, locked_until FROM lockouts WHERE key = ?", (key,)).fetchone()
+    return (int(row["failures"]), float(row["locked_until"])) if row else (0, 0.0)
+
+
+def set_lockout(conn, key: str, failures: int, locked_until: float) -> None:
+    conn.execute(
+        "INSERT INTO lockouts (key, failures, locked_until) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET failures = excluded.failures, locked_until = excluded.locked_until",
+        (key, failures, locked_until),
+    )
+
+
+def clear_lockout(conn, key: str) -> None:
+    conn.execute("DELETE FROM lockouts WHERE key = ?", (key,))
+
+
+def clear_all_lockouts(conn) -> None:
+    conn.execute("DELETE FROM lockouts")

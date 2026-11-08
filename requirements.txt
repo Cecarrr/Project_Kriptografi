@@ -1,4 +1,4 @@
-# CryptVault - Tugas Akhir Kriptografi
+# Brankas - Tugas Akhir Kriptografi
 # Python 3.14, Windows. Pasang dengan:  pip install -r requirements.txt
 
 # Folder berisi file wheel dlib (letakkan dlib-*.whl di sini, di dalam repo)

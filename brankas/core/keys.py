@@ -99,6 +99,14 @@ def derive_keyset(master_key: bytes) -> KeySet:
     )
 
 
+def derive_username_key(dongle_key: bytes) -> bytes:
+    """HKDF(dongle_key, info=b'brankas/username/v1') -> 32 B. Untuk enkripsi username di tabel users
+    (dibuka begitu dongle dikenali, sebelum wajah dan password)."""
+    if len(dongle_key) != config.DONGLE_KEY_BYTES:
+        raise ValueError("dongle_key harus 32 byte")
+    return _hkdf(dongle_key, b"brankas/username/v1")
+
+
 def derive_face_key(dongle_key: bytes) -> bytes:
     """HKDF(dongle_key, info=b'brankas/face/v1') -> 32 B. Untuk enkripsi encoding wajah
     (dipakai SEBELUM password diketahui)."""

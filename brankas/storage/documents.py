@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from brankas import config
+from brankas.applog import get_logger
 from brankas.chain import blockchain
 from brankas.core import crypto
 from brankas.errors import DecryptionError, FileTooLarge, ItemNotFound, UnsupportedFileType
@@ -80,6 +81,7 @@ def add_document(session: Session, src_path: Path) -> DocInfo:
     except BaseException:
         target.unlink(missing_ok=True)   # jangan tinggalkan file yatim bila DB/chain gagal
         raise
+    log.info("unggah dokumen id=%s user=%s ukuran=%d", doc_id, session.user_id, size)
     return DocInfo(doc_id, src.name, ext, size, created_at)
 
 
@@ -104,7 +106,7 @@ def _decrypt_owned(session: Session, doc_id: str) -> bytes:
     """Dekripsi dokumen milik session ke memori (tidak menulis apa pun ke disk)."""
     with db.transaction() as conn:
         row = _get_owned(conn, session, doc_id)
-    path = config.VAULT_DIR / row["stored_path"]
+    path = safe_vault_path(config.VAULT_DIR, row["stored_path"])   # UnsafePath bila baris DB dimanipulasi
     if not path.is_file():
         raise ItemNotFound("File terenkripsi hilang dari vault")
     return crypto.decrypt_file(path.read_bytes(), session.keys)
@@ -121,6 +123,7 @@ def export_document(session: Session, doc_id: str, dest_path: Path) -> None:
     # Dicatat SEBELUM plaintext keluar dari aplikasi: bila pencatatan gagal, tidak ada yang tertulis.
     _audit(session, "UNDUH", doc_id)
     Path(dest_path).write_bytes(data)
+    log.info("unduh dokumen id=%s user=%s", doc_id, session.user_id)
 
 
 def read_document(session: Session, doc_id: str) -> bytes:
@@ -136,6 +139,10 @@ def delete_document(session: Session, doc_id: str) -> None:
     """Hapus file .enc dan baris DB, catat blok DELETE."""
     with db.transaction() as conn:
         row = _get_owned(conn, session, doc_id)
+        # Validasi SEBELUM mengubah apa pun: stored_path yang tidak aman membatalkan seluruh penghapusan,
+        # sehingga unlink() tidak pernah bisa menyentuh berkas di luar vault.
+        target = safe_vault_path(config.VAULT_DIR, row["stored_path"])
         conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         blockchain.add_block(conn, session.user_id, "DELETE", doc_id, row["cipher_sha256"])
-    (config.VAULT_DIR / row["stored_path"]).unlink(missing_ok=True)   # setelah commit
+    target.unlink(missing_ok=True)   # setelah commit
+    log.info("hapus dokumen id=%s user=%s", doc_id, session.user_id)

@@ -163,6 +163,16 @@ class TestKeys(unittest.TestCase):
         self.assertEqual(keys.derive_face_key(dg), keys.derive_face_key(dg))
         self.assertNotEqual(keys.derive_face_key(dg), keys.derive_keyset(dg).k_db)
 
+    def test_username_key(self):
+        dg = os.urandom(32)
+        k = keys.derive_username_key(dg)
+        self.assertEqual(len(k), 32)
+        self.assertEqual(k, keys.derive_username_key(dg))
+        self.assertNotEqual(k, keys.derive_face_key(dg))
+        self.assertNotEqual(k, keys.derive_username_key(os.urandom(32)))
+        with self.assertRaises(ValueError):
+            keys.derive_username_key(b"pendek")
+
     def test_password_hash(self):
         h = keys.hash_password("rahasia-123")
         self.assertTrue(keys.verify_password(h, "rahasia-123"))

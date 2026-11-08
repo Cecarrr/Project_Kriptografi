@@ -2,6 +2,9 @@
 
 Frame = numpy array RGB (H, W, 3). Konversi dari BGR OpenCV dilakukan di sini.
 Encoding = 128 float64 -> diserialisasi ke bytes (enc.tobytes()) sebelum dienkripsi.
+
+Pemilihan wajah: bila ada beberapa wajah di frame, dipakai yang TERBESAR (bukan yang pertama terdeteksi).
+Wajah terlalu kecil ditolak, dan bila ada wajah kedua dengan ukuran mirip, frame ditolak sebagai ambigu.
 """
 from __future__ import annotations
 
@@ -10,7 +13,7 @@ import face_recognition
 import numpy as np
 
 from brankas import config
-from brankas.errors import BrankasError, InvalidInput, NoFaceDetected
+from brankas.errors import AmbiguousFace, BrankasError, InvalidInput, NoFaceDetected
 
 
 def capture_frame() -> np.ndarray:
@@ -31,9 +34,36 @@ def capture_frame() -> np.ndarray:
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
-def encode_face(frame: np.ndarray) -> np.ndarray:
-    """Encoding satu wajah. Melempar NoFaceDetected bila tidak ada wajah."""
-    encodings = face_recognition.face_encodings(frame)
+def _area(loc: tuple[int, int, int, int]) -> int:
+    top, right, bottom, left = loc          # format face_recognition
+    return max(0, bottom - top) * max(0, right - left)
+
+
+def pick_face(locations: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
+    """Pilih wajah utama dari daftar kotak (top, right, bottom, left).
+    NoFaceDetected bila kosong / terlalu kecil; AmbiguousFace bila ada wajah kedua berukuran mirip."""
+    if not locations:
+        raise NoFaceDetected("Tidak ada wajah yang terdeteksi pada gambar")
+    ranked = sorted(locations, key=_area, reverse=True)
+    main = ranked[0]
+    height = main[2] - main[0]
+    if height < config.FACE_MIN_SIZE_PX:
+        raise NoFaceDetected(
+            f"Wajah terlalu kecil di frame ({height} px, minimal {config.FACE_MIN_SIZE_PX} px). Dekatkan wajah ke kamera."
+        )
+    if len(ranked) > 1 and _area(ranked[1]) >= config.FACE_AMBIGUITY_RATIO * _area(main):
+        raise AmbiguousFace("Terdeteksi lebih dari satu wajah dengan ukuran mirip. Pastikan hanya satu orang di depan kamera.")
+    return main
+
+
+def encode_face(frame: np.ndarray, num_jitters: int | None = None) -> np.ndarray:
+    """Encoding wajah utama. NoFaceDetected / AmbiguousFace bila tidak ada wajah yang layak dipakai."""
+    if num_jitters is None:
+        num_jitters = config.FACE_JITTERS_LOGIN
+    loc = pick_face(face_recognition.face_locations(frame))
+    encodings = face_recognition.face_encodings(
+        frame, known_face_locations=[loc], num_jitters=num_jitters, model=config.FACE_LANDMARK_MODEL
+    )
     if not encodings:
         raise NoFaceDetected("Tidak ada wajah yang terdeteksi pada gambar")
     return encodings[0].astype(np.float64)
@@ -41,18 +71,26 @@ def encode_face(frame: np.ndarray) -> np.ndarray:
 
 def enroll(frames: list[np.ndarray]) -> bytes:
     """Dari beberapa frame hasilkan encoding gabungan (rata-rata) dalam bentuk bytes.
-    Tidak dinormalkan: encoding live pada verify() juga mentah, supaya jarak sebanding."""
+    Tidak dinormalkan: encoding live pada verify() juga mentah, supaya jarak sebanding.
+    InvalidInput bila sampel saling berjauhan (mis. orang berbeda terekam di tengah pendaftaran)."""
     if not frames:
         raise InvalidInput("Dibutuhkan minimal satu frame untuk pendaftaran wajah")
 
-    encs = [encode_face(f) for f in frames]
+    encs = [encode_face(f, num_jitters=config.FACE_JITTERS_ENROLL) for f in frames]
+    if len(encs) > 1:
+        spread = max(float(np.linalg.norm(a - b)) for i, a in enumerate(encs) for b in encs[i + 1:])
+        if spread > config.FACE_ENROLL_MAX_SPREAD:
+            raise InvalidInput(
+                f"Sampel wajah tidak konsisten (selisih {spread:.2f} > {config.FACE_ENROLL_MAX_SPREAD}). "
+                "Pastikan orang yang sama dan pencahayaan cukup, lalu ulangi pengambilan sampel."
+            )
     return np.mean(encs, axis=0).astype(np.float64).tobytes()
 
 
 def distance(frame: np.ndarray, stored: bytes) -> float:
     """Jarak Euclidean antara wajah di frame dan encoding tersimpan (makin kecil makin mirip).
-    NoFaceDetected bila tidak ada wajah di frame."""
-    current_enc = encode_face(frame)
+    NoFaceDetected / AmbiguousFace bila tidak ada wajah yang layak di frame."""
+    current_enc = encode_face(frame, num_jitters=config.FACE_JITTERS_LOGIN)
     stored_enc = np.frombuffer(stored, dtype=np.float64)
     if len(stored_enc) != 128:
         raise BrankasError("Format data encoding wajah tersimpan tidak valid")
