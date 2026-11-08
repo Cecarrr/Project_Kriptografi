@@ -23,40 +23,40 @@ def _check_key(key: bytes) -> None:
         raise ValueError("kunci harus 32 byte")
 
 
-def _seal(cipher_cls, data: bytes, key: bytes) -> bytes:
+def _seal(cipher_cls, data: bytes, key: bytes, aad: bytes | None = None) -> bytes:
     _check_key(key)
     nonce = os.urandom(NONCE_LEN)
-    return nonce + cipher_cls(key).encrypt(nonce, data, None)
+    return nonce + cipher_cls(key).encrypt(nonce, data, aad)
 
 
-def _open(cipher_cls, blob: bytes, key: bytes) -> bytes:
+def _open(cipher_cls, blob: bytes, key: bytes, aad: bytes | None = None) -> bytes:
     _check_key(key)
     if len(blob) < NONCE_LEN + TAG_LEN:
         raise DecryptionError("Data terenkripsi terlalu pendek / rusak")
     nonce, body = blob[:NONCE_LEN], blob[NONCE_LEN:]
     try:
-        return cipher_cls(key).decrypt(nonce, body, None)
+        return cipher_cls(key).decrypt(nonce, body, aad)
     except InvalidTag:
         raise DecryptionError("Kunci salah atau data telah diubah") from None
 
 
 # ---- primitif generik ----
-def aes_encrypt(data: bytes, key: bytes) -> bytes:
+def aes_encrypt(data: bytes, key: bytes, aad: bytes | None = None) -> bytes:
     """AES-256-GCM."""
-    return _seal(AESGCM, data, key)
+    return _seal(AESGCM, data, key, aad)
 
 
-def aes_decrypt(blob: bytes, key: bytes) -> bytes:
-    return _open(AESGCM, blob, key)
+def aes_decrypt(blob: bytes, key: bytes, aad: bytes | None = None) -> bytes:
+    return _open(AESGCM, blob, key, aad)
 
 
-def chacha_encrypt(data: bytes, key: bytes) -> bytes:
+def chacha_encrypt(data: bytes, key: bytes, aad: bytes | None = None) -> bytes:
     """ChaCha20-Poly1305."""
-    return _seal(ChaCha20Poly1305, data, key)
+    return _seal(ChaCha20Poly1305, data, key, aad)
 
 
-def chacha_decrypt(blob: bytes, key: bytes) -> bytes:
-    return _open(ChaCha20Poly1305, blob, key)
+def chacha_decrypt(blob: bytes, key: bytes, aad: bytes | None = None) -> bytes:
+    return _open(ChaCha20Poly1305, blob, key, aad)
 
 
 def vigenere_encrypt(data: bytes, key: bytes) -> bytes:

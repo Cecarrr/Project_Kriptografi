@@ -29,9 +29,45 @@ class TestAead(unittest.TestCase):
         self.assertEqual(crypto.aes_decrypt(crypto.aes_encrypt(data, key), key), data)
         self.assertEqual(crypto.chacha_decrypt(crypto.chacha_encrypt(data, key), key), data)
 
+    def test_aes_with_aad_roundtrip(self):
+        key, data, aad = os.urandom(32), b"isi rahasia dokumen", b"doc_id=123;user_id=1"
+        blob = crypto.aes_encrypt(data, key, aad=aad)
+        self.assertEqual(crypto.aes_decrypt(blob, key, aad=aad), data)
+
+    def test_aes_wrong_aad_fails(self):
+        key, data, aad = os.urandom(32), b"isi rahasia dokumen", b"doc_id=123"
+        blob = crypto.aes_encrypt(data, key, aad=aad)
+        # Dekripsi dengan AAD berbeda harus gagal
+        with self.assertRaises(DecryptionError):
+            crypto.aes_decrypt(blob, key, aad=b"doc_id=999")
+        # Dekripsi tanpa AAD (None) juga harus gagal
+        with self.assertRaises(DecryptionError):
+            crypto.aes_decrypt(blob, key, aad=None)
+
+    def test_aes_encrypted_without_aad_fails_with_aad(self):
+        key, data = os.urandom(32), b"isi rahasia"
+        blob = crypto.aes_encrypt(data, key)  # aad=None
+        with self.assertRaises(DecryptionError):
+            crypto.aes_decrypt(blob, key, aad=b"unexpected_aad")
+
+    def test_chacha_with_aad_roundtrip(self):
+        key, data, aad = os.urandom(32), b"catatan sangat penting", b"note_id=42"
+        blob = crypto.chacha_encrypt(data, key, aad=aad)
+        self.assertEqual(crypto.chacha_decrypt(blob, key, aad=aad), data)
+
+    def test_chacha_wrong_aad_fails(self):
+        key, data, aad = os.urandom(32), b"catatan sangat penting", b"note_id=42"
+        blob = crypto.chacha_encrypt(data, key, aad=aad)
+        with self.assertRaises(DecryptionError):
+            crypto.chacha_decrypt(blob, key, aad=b"note_id=43")
+        with self.assertRaises(DecryptionError):
+            crypto.chacha_decrypt(blob, key, aad=None)
+
     def test_empty_data(self):
         key = os.urandom(32)
         self.assertEqual(crypto.aes_decrypt(crypto.aes_encrypt(b"", key), key), b"")
+        self.assertEqual(crypto.chacha_decrypt(crypto.chacha_encrypt(b"", key), key), b"")
+        self.assertEqual(crypto.aes_decrypt(crypto.aes_encrypt(b"", key, aad=b"ctx"), key, aad=b"ctx"), b"")
 
     def test_nonce_random(self):
         key, data = os.urandom(32), b"sama"
@@ -50,6 +86,15 @@ class TestAead(unittest.TestCase):
             blob[-1] ^= 0x01
             with self.assertRaises(DecryptionError):
                 dec(bytes(blob), key)
+
+    def test_tamper_with_aad_detected(self):
+        key, aad = os.urandom(32), b"context_aad"
+        for enc, dec in ((crypto.aes_encrypt, crypto.aes_decrypt),
+                         (crypto.chacha_encrypt, crypto.chacha_decrypt)):
+            blob = bytearray(enc(b"data penting ber-aad", key, aad=aad))
+            blob[-1] ^= 0x01
+            with self.assertRaises(DecryptionError):
+                dec(bytes(blob), key, aad=aad)
 
     def test_too_short(self):
         with self.assertRaises(DecryptionError):
