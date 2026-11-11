@@ -18,5 +18,9 @@ data/
 Thumbs.db
 desktop.ini
 
+# File build dan distribusi
+build/
+dist/
+
 # Catatan: folder wheels/ (berisi dlib-*.whl) SENGAJA di-commit
 # agar kedua anggota memakai file yang sama.
