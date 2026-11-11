@@ -1,7 +1,13 @@
 """Konstanta bersama. Ubah di sini, jangan hardcode di modul lain."""
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+import sys
+from pathlib import Path
+
+if getattr(sys, "frozen", False):          # berjalan sebagai .exe
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"          # di-gitignore
 VAULT_DIR = DATA_DIR / "vault"        # file terenkripsi (.enc)
 DB_PATH = DATA_DIR / "brankas.db"
